@@ -12,8 +12,8 @@ from typing import Optional
 from curl_cffi.requests import Session
 
 from services.account_service import account_service
-from services.config import config
 from services import proof_of_work
+from services.proxy_service import proxy_settings
 
 
 BASE_URL = "https://chatgpt.com"
@@ -98,9 +98,10 @@ def _build_fp(access_token: str) -> dict:
 def _new_session(access_token: str) -> tuple[Session, dict]:
     fp = _build_fp(access_token)
     session = Session(
-        impersonate=fp.get("impersonate") or "edge101",
-        verify=True,
-        **config.session_kwargs(),
+        **proxy_settings.build_session_kwargs(
+            impersonate=fp.get("impersonate") or "edge101",
+            verify=True,
+        )
     )
     session.headers.update(
         {

@@ -1,40 +1,13 @@
 from __future__ import annotations
+
 import json
 import os
 import sys
-from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data"
 CONFIG_FILE = BASE_DIR / "config.json"
-
-
-@dataclass(frozen=True)
-class AppSettings:
-    auth_key: str
-    host: str
-    port: int
-    accounts_file: Path
-    refresh_account_interval_minute: int
-    proxy: str | None
-    http_proxy: str | None
-    https_proxy: str | None
-
-    def outbound_proxies(self) -> dict[str, str]:
-        proxies: dict[str, str] = {}
-        if self.proxy:
-            proxies["all"] = self.proxy
-        if self.http_proxy:
-            proxies["http"] = self.http_proxy
-        if self.https_proxy:
-            proxies["https"] = self.https_proxy
-        return proxies
-
-    def session_kwargs(self) -> dict[str, object]:
-        proxies = self.outbound_proxies()
-        return {"proxies": proxies} if proxies else {}
 
 
 def _readable_json_file(path: Path, *, name: str) -> Path | None:
@@ -59,64 +32,73 @@ def _load_json_object(path: Path, *, name: str) -> dict[str, object]:
     return loaded
 
 
-def _optional_setting(value: object) -> str | None:
-    text = str(value or "").strip()
-    return text or None
+def _optional_setting(value: object) -> str:
+    return str(value or "").strip()
 
 
-def _load_settings() -> AppSettings:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+class ConfigStore:
+    def __init__(self, path: Path):
+        self.path = path
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        self.data = self._load()
+        if not self.auth_key:
+            raise ValueError(
+                "❌ auth-key 未设置！\n"
+                "请按以下任意一种方式解决：\n"
+                "1. 在 Render 的 Environment 变量中添加：\n"
+                "   CHATGPT2API_AUTH_KEY = your_real_auth_key\n"
+                "2. 或者在 config.json 中填写：\n"
+                '   "auth-key": "your_real_auth_key"'
+            )
 
-    # 优先使用环境变量，文件配置仅作为本地/自托管回退
-    raw_config: dict[str, object] = {}
-    config_file = _readable_json_file(CONFIG_FILE, name="config.json")
-    if config_file is not None:
-        raw_config.update(_load_json_object(config_file, name="config.json"))
+    def _load(self) -> dict[str, object]:
+        config_file = _readable_json_file(self.path, name=self.path.name)
+        if config_file is None:
+            return {}
+        try:
+            return _load_json_object(config_file, name=config_file.name)
+        except Exception:
+            return {}
 
-    auth_key = str(
-        os.getenv("CHATGPT2API_AUTH_KEY")
-        or raw_config.get("auth-key")
-        or ""
-    ).strip()
+    def _save(self) -> None:
+        self.path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-    if not auth_key:
-        raise ValueError(
-            "❌ auth-key 未设置！\n"
-            "请按以下任意一种方式解决：\n"
-            "1. 在 Render 的 Environment 变量中添加：\n"
-            "   CHATGPT2API_AUTH_KEY = your_real_auth_key\n"
-            "2. 或者在 config.json 中填写：\n"
-            '   "auth-key": "your_real_auth_key"'
+    @property
+    def auth_key(self) -> str:
+        return _optional_setting(os.getenv("CHATGPT2API_AUTH_KEY") or self.data.get("auth-key"))
+
+    @property
+    def accounts_file(self) -> Path:
+        return DATA_DIR / "accounts.json"
+
+    @property
+    def refresh_account_interval_minute(self) -> int:
+        try:
+            return int(self.data.get("refresh_account_interval_minute", 60))
+        except (TypeError, ValueError):
+            return 60
+
+    def get(self) -> dict[str, object]:
+        return dict(self.data)
+
+    def get_proxy_settings(self) -> str:
+        return (
+            _optional_setting(os.getenv("CHATGPT2API_PROXY"))
+            or _optional_setting(os.getenv("CHATGPT2API_HTTPS_PROXY"))
+            or _optional_setting(os.getenv("CHATGPT2API_HTTP_PROXY"))
+            or _optional_setting(self.data.get("proxy"))
+            or _optional_setting(self.data.get("https-proxy") or self.data.get("https_proxy"))
+            or _optional_setting(self.data.get("http-proxy") or self.data.get("http_proxy"))
         )
 
-    refresh_account_interval_minute = cast(
-        int, raw_config.get("refresh_account_interval_minute", 60)
-    )
-    proxy = _optional_setting(
-        os.getenv("CHATGPT2API_PROXY")
-        or raw_config.get("proxy")
-    )
-    http_proxy = _optional_setting(
-        os.getenv("CHATGPT2API_HTTP_PROXY")
-        or raw_config.get("http-proxy")
-        or raw_config.get("http_proxy")
-    )
-    https_proxy = _optional_setting(
-        os.getenv("CHATGPT2API_HTTPS_PROXY")
-        or raw_config.get("https-proxy")
-        or raw_config.get("https_proxy")
-    )
+    def update(self, data: dict[str, object]) -> dict[str, object]:
+        self.data = dict(data or {})
+        self._save()
+        return self.get()
 
-    return AppSettings(
-        auth_key=auth_key,
-        host="0.0.0.0",
-        port=8000,
-        accounts_file=DATA_DIR / "accounts.json",
-        refresh_account_interval_minute=refresh_account_interval_minute,
-        proxy=proxy,
-        http_proxy=http_proxy,
-        https_proxy=https_proxy,
-    )
+
+def _load_settings() -> ConfigStore:
+    return ConfigStore(CONFIG_FILE)
 
 
 config = _load_settings()

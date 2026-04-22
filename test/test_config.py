@@ -34,7 +34,7 @@ class ConfigLoadingTests(unittest.TestCase):
         *,
         config_payload: dict | None = None,
         env: dict[str, str] | None = None,
-    ):
+    ) -> dict[str, object]:
         module = self.config_module
         old_base_dir = module.BASE_DIR
         old_data_dir = module.DATA_DIR
@@ -58,7 +58,12 @@ class ConfigLoadingTests(unittest.TestCase):
             fake_path = module.CONFIG_FILE
             with patch.object(module, "_readable_json_file", return_value=fake_path if config_payload is not None else None):
                 with patch.object(module, "_load_json_object", return_value=config_payload or {}):
-                    return module._load_settings()
+                    settings = module._load_settings()
+                    return {
+                        "auth_key": settings.auth_key,
+                        "refresh_account_interval_minute": settings.refresh_account_interval_minute,
+                        "proxy": settings.get_proxy_settings(),
+                    }
         finally:
             module.BASE_DIR = old_base_dir
             module.DATA_DIR = old_data_dir
@@ -74,33 +79,22 @@ class ConfigLoadingTests(unittest.TestCase):
             env={"CHATGPT2API_AUTH_KEY": "env-auth"},
         )
 
-        self.assertEqual(settings.auth_key, "env-auth")
-        self.assertEqual(settings.refresh_account_interval_minute, 60)
-        self.assertEqual(settings.session_kwargs(), {})
+        self.assertEqual(settings["auth_key"], "env-auth")
+        self.assertEqual(settings["refresh_account_interval_minute"], 60)
+        self.assertEqual(settings["proxy"], "")
 
-    def test_load_settings_reads_proxy_values_from_config_file(self) -> None:
+    def test_load_settings_reads_http_proxy_fallback_from_config_file(self) -> None:
         settings = self._load_settings(
             config_payload={
                 "auth-key": "config-auth",
                 "refresh_account_interval_minute": 5,
-                "proxy": "socks5://127.0.0.1:7890",
-                "http-proxy": "http://127.0.0.1:7891",
-                "https-proxy": "http://127.0.0.1:7892",
+                "http_proxy": "http://127.0.0.1:7891",
             }
         )
 
-        self.assertEqual(settings.auth_key, "config-auth")
-        self.assertEqual(settings.refresh_account_interval_minute, 5)
-        self.assertEqual(
-            settings.session_kwargs(),
-            {
-                "proxies": {
-                    "all": "socks5://127.0.0.1:7890",
-                    "http": "http://127.0.0.1:7891",
-                    "https": "http://127.0.0.1:7892",
-                }
-            },
-        )
+        self.assertEqual(settings["auth_key"], "config-auth")
+        self.assertEqual(settings["refresh_account_interval_minute"], 5)
+        self.assertEqual(settings["proxy"], "http://127.0.0.1:7891")
 
     def test_environment_proxy_values_override_config_file(self) -> None:
         settings = self._load_settings(
@@ -118,10 +112,8 @@ class ConfigLoadingTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(settings.auth_key, "env-auth")
-        self.assertEqual(settings.proxy, "socks5://127.0.0.1:8890")
-        self.assertEqual(settings.http_proxy, "http://127.0.0.1:8891")
-        self.assertEqual(settings.https_proxy, "http://127.0.0.1:8892")
+        self.assertEqual(settings["auth_key"], "env-auth")
+        self.assertEqual(settings["proxy"], "socks5://127.0.0.1:8890")
 
 
 if __name__ == "__main__":
