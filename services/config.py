@@ -18,6 +18,23 @@ class AppSettings:
     port: int
     accounts_file: Path
     refresh_account_interval_minute: int
+    proxy: str | None
+    http_proxy: str | None
+    https_proxy: str | None
+
+    def outbound_proxies(self) -> dict[str, str]:
+        proxies: dict[str, str] = {}
+        if self.proxy:
+            proxies["all"] = self.proxy
+        if self.http_proxy:
+            proxies["http"] = self.http_proxy
+        if self.https_proxy:
+            proxies["https"] = self.https_proxy
+        return proxies
+
+    def session_kwargs(self) -> dict[str, object]:
+        proxies = self.outbound_proxies()
+        return {"proxies": proxies} if proxies else {}
 
 
 def _readable_json_file(path: Path, *, name: str) -> Path | None:
@@ -40,6 +57,11 @@ def _load_json_object(path: Path, *, name: str) -> dict[str, object]:
     if not isinstance(loaded, dict):
         raise ValueError(f"{name} must be a JSON object")
     return loaded
+
+
+def _optional_setting(value: object) -> str | None:
+    text = str(value or "").strip()
+    return text or None
 
 
 def _load_settings() -> AppSettings:
@@ -70,6 +92,20 @@ def _load_settings() -> AppSettings:
     refresh_account_interval_minute = cast(
         int, raw_config.get("refresh_account_interval_minute", 60)
     )
+    proxy = _optional_setting(
+        os.getenv("CHATGPT2API_PROXY")
+        or raw_config.get("proxy")
+    )
+    http_proxy = _optional_setting(
+        os.getenv("CHATGPT2API_HTTP_PROXY")
+        or raw_config.get("http-proxy")
+        or raw_config.get("http_proxy")
+    )
+    https_proxy = _optional_setting(
+        os.getenv("CHATGPT2API_HTTPS_PROXY")
+        or raw_config.get("https-proxy")
+        or raw_config.get("https_proxy")
+    )
 
     return AppSettings(
         auth_key=auth_key,
@@ -77,6 +113,9 @@ def _load_settings() -> AppSettings:
         port=8000,
         accounts_file=DATA_DIR / "accounts.json",
         refresh_account_interval_minute=refresh_account_interval_minute,
+        proxy=proxy,
+        http_proxy=http_proxy,
+        https_proxy=https_proxy,
     )
 
 

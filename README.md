@@ -262,3 +262,34 @@ curl http://localhost:8000/v1/responses \
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/chart?repos=basketikun/chatgpt2api&type=date&legend=top-left)](https://www.star-history.com/?repos=basketikun%2Fchatgpt2api&type=date&legend=top-left)
+
+## Outbound Proxy
+
+You can configure the upstream outbound proxy in either `config.json`
+or environment variables.
+
+`config.json` example:
+
+```json
+{
+  "auth-key": "chatgpt2api",
+  "refresh_account_interval_minute": 60,
+  "proxy": "socks5://127.0.0.1:7890",
+  "http-proxy": "http://127.0.0.1:7890",
+  "https-proxy": "http://127.0.0.1:7890"
+}
+```
+
+Environment variable overrides:
+
+```bash
+CHATGPT2API_PROXY=socks5://127.0.0.1:7890
+CHATGPT2API_HTTP_PROXY=http://127.0.0.1:7890
+CHATGPT2API_HTTPS_PROXY=http://127.0.0.1:7890
+```
+
+Priority:
+
+- Environment variables override `config.json`
+- `CHATGPT2API_PROXY` / `proxy` applies to all outbound requests
+- `CHATGPT2API_HTTP_PROXY` and `CHATGPT2API_HTTPS_PROXY` can override per scheme

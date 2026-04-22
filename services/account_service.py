@@ -398,7 +398,7 @@ class AccountService:
 
         headers, impersonate = self._build_remote_headers(access_token)
         print(f"[account-refresh] start {access_token[:12]}...")
-        session = Session(impersonate=impersonate, verify=True)
+        session = Session(impersonate=impersonate, verify=True, **config.session_kwargs())
         session.headers.update(headers)
         try:
             with ThreadPoolExecutor(max_workers=2) as executor:

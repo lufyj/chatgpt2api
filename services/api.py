@@ -4,16 +4,17 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from threading import Event, Thread
 
-from fastapi import APIRouter, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import APIRouter, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from services.account_service import account_service
 from services.chatgpt_service import ChatGPTService
 from services.config import config
 from services.cpa_service import cpa_config, cpa_import_service, list_remote_files
+from services.task_service import AsyncTaskService
 
 from services.image_service import ImageGenerationError
 from services.version import get_app_version
@@ -28,6 +29,7 @@ class ImageGenerationRequest(BaseModel):
     n: int = Field(default=1, ge=1, le=4)
     response_format: str = "b64_json"
     history_disabled: bool = True
+    async_: bool | None = Field(default=None, alias="async")
 
 
 class AccountCreateRequest(BaseModel):
@@ -58,6 +60,7 @@ class ChatCompletionRequest(BaseModel):
     stream: bool | None = None
     modalities: list[str] | None = None
     messages: list[dict[str, object]] | None = None
+    async_: bool | None = Field(default=None, alias="async")
 
 
 class ResponseCreateRequest(BaseModel):
@@ -68,6 +71,7 @@ class ResponseCreateRequest(BaseModel):
     tools: list[dict[str, object]] | None = None
     tool_choice: object | None = None
     stream: bool | None = None
+    async_: bool | None = Field(default=None, alias="async")
 
 
 class CPAPoolCreateRequest(BaseModel):
@@ -121,6 +125,32 @@ def require_auth_key(authorization: str | None) -> None:
         raise HTTPException(status_code=401, detail={"error": "authorization is invalid"})
 
 
+def is_truthy_flag(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def request_wants_async(
+    request: Request,
+    prefer: str | None,
+    x_flow_async: str | None,
+    body_async: object = None,
+) -> bool:
+    if is_truthy_flag(body_async):
+        return True
+    if is_truthy_flag(request.query_params.get("async")):
+        return True
+    if is_truthy_flag(x_flow_async):
+        return True
+    prefer_tokens = {item.strip().lower() for item in str(prefer or "").split(",") if item.strip()}
+    return "respond-async" in prefer_tokens
+
+
+def accepted_task_response(task_payload: dict[str, object]) -> JSONResponse:
+    return JSONResponse(status_code=202, content=task_payload)
+
+
 def start_limited_account_watcher(stop_event: Event) -> Thread:
     interval_seconds = config.refresh_account_interval_minute * 60
 
@@ -168,6 +198,7 @@ def resolve_web_asset(requested_path: str) -> Path | None:
 
 def create_app() -> FastAPI:
     chatgpt_service = ChatGPTService(account_service)
+    task_service = AsyncTaskService()
     app_version = get_app_version()
 
     @asynccontextmanager
@@ -179,6 +210,7 @@ def create_app() -> FastAPI:
         finally:
             stop_event.set()
             thread.join(timeout=1)
+            task_service.shutdown()
 
     app = FastAPI(title="chatgpt2api", version=app_version, lifespan=lifespan)
     app.add_middleware(
@@ -199,6 +231,14 @@ def create_app() -> FastAPI:
                 build_model_item("gpt-image-2"),
             ],
         }
+
+    @router.get("/v1/tasks/{task_id}", name="get_task")
+    async def get_task(task_id: str, authorization: str | None = Header(default=None)):
+        require_auth_key(authorization)
+        task = task_service.get_task(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail={"error": "task not found"})
+        return task
 
     @router.post("/auth/login")
     async def login(authorization: str | None = Header(default=None)):
@@ -272,8 +312,22 @@ def create_app() -> FastAPI:
         return {"item": account, "items": account_service.list_accounts()}
 
     @router.post("/v1/images/generations")
-    async def generate_images(body: ImageGenerationRequest, authorization: str | None = Header(default=None)):
+    async def generate_images(
+        body: ImageGenerationRequest,
+        request: Request,
+        authorization: str | None = Header(default=None),
+        prefer: str | None = Header(default=None),
+        x_flow_async: str | None = Header(default=None, alias="X-Flow-Async"),
+    ):
         require_auth_key(authorization)
+        if request_wants_async(request, prefer, x_flow_async, body.async_):
+            return accepted_task_response(
+                task_service.create_task(
+                    model=body.model,
+                    runner=lambda: chatgpt_service.generate_with_pool(body.prompt, body.model, body.n),
+                    status_url_builder=lambda task_id: str(request.url_for("get_task", task_id=task_id)),
+                )
+            )
         try:
             return await run_in_threadpool(chatgpt_service.generate_with_pool, body.prompt, body.model, body.n)
         except ImageGenerationError as exc:
@@ -281,11 +335,15 @@ def create_app() -> FastAPI:
 
     @router.post("/v1/images/edits")
     async def edit_images(
+            request: Request,
             authorization: str | None = Header(default=None),
+            prefer: str | None = Header(default=None),
+            x_flow_async: str | None = Header(default=None, alias="X-Flow-Async"),
             image: list[UploadFile] = File(...),
             prompt: str = Form(...),
             model: str = Form(default="gpt-image-1"),
             n: int = Form(default=1),
+            async_flag: str | None = Form(default=None, alias="async"),
     ):
         require_auth_key(authorization)
         if n < 1 or n > 4:
@@ -301,6 +359,15 @@ def create_app() -> FastAPI:
             mime_type = upload.content_type or "image/png"
             images.append((image_data, file_name, mime_type))
 
+        if request_wants_async(request, prefer, x_flow_async, async_flag):
+            return accepted_task_response(
+                task_service.create_task(
+                    model=model,
+                    runner=lambda: chatgpt_service.edit_with_pool(prompt, images, model, n),
+                    status_url_builder=lambda task_id: str(request.url_for("get_task", task_id=task_id)),
+                )
+            )
+
         try:
             return await run_in_threadpool(
                 chatgpt_service.edit_with_pool, prompt, images, model, n
@@ -309,14 +376,46 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
 
     @router.post("/v1/chat/completions")
-    async def create_chat_completion(body: ChatCompletionRequest, authorization: str | None = Header(default=None)):
+    async def create_chat_completion(
+        body: ChatCompletionRequest,
+        request: Request,
+        authorization: str | None = Header(default=None),
+        prefer: str | None = Header(default=None),
+        x_flow_async: str | None = Header(default=None, alias="X-Flow-Async"),
+    ):
         require_auth_key(authorization)
-        return await run_in_threadpool(chatgpt_service.create_image_completion, body.model_dump(mode="python"))
+        body_data = body.model_dump(mode="python", exclude={"async_"})
+        if request_wants_async(request, prefer, x_flow_async, body.async_):
+            chatgpt_service.validate_image_completion_request(body_data)
+            return accepted_task_response(
+                task_service.create_task(
+                    model=body.model,
+                    runner=lambda: chatgpt_service.create_image_completion(body_data),
+                    status_url_builder=lambda task_id: str(request.url_for("get_task", task_id=task_id)),
+                )
+            )
+        return await run_in_threadpool(chatgpt_service.create_image_completion, body_data)
 
     @router.post("/v1/responses")
-    async def create_response(body: ResponseCreateRequest, authorization: str | None = Header(default=None)):
+    async def create_response(
+        body: ResponseCreateRequest,
+        request: Request,
+        authorization: str | None = Header(default=None),
+        prefer: str | None = Header(default=None),
+        x_flow_async: str | None = Header(default=None, alias="X-Flow-Async"),
+    ):
         require_auth_key(authorization)
-        return await run_in_threadpool(chatgpt_service.create_response, body.model_dump(mode="python"))
+        body_data = body.model_dump(mode="python", exclude={"async_"})
+        if request_wants_async(request, prefer, x_flow_async, body.async_):
+            chatgpt_service.validate_response_request(body_data)
+            return accepted_task_response(
+                task_service.create_task(
+                    model=body.model,
+                    runner=lambda: chatgpt_service.create_response(body_data),
+                    status_url_builder=lambda task_id: str(request.url_for("get_task", task_id=task_id)),
+                )
+            )
+        return await run_in_threadpool(chatgpt_service.create_response, body_data)
 
     # ── CPA multi-pool endpoints ────────────────────────────────────
 

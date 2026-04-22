@@ -44,6 +44,35 @@ class ChatGPTService:
     def __init__(self, account_service: AccountService):
         self.account_service = account_service
 
+    def validate_image_completion_request(self, body: dict[str, object]) -> None:
+        if not is_image_chat_request(body):
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "only image generation requests are supported on this endpoint"},
+            )
+
+        if bool(body.get("stream")):
+            raise HTTPException(status_code=400, detail={"error": "stream is not supported for image generation"})
+
+        parse_image_count(body.get("n"))
+        prompt = extract_chat_prompt(body)
+        if not prompt:
+            raise HTTPException(status_code=400, detail={"error": "prompt is required"})
+
+    def validate_response_request(self, body: dict[str, object]) -> None:
+        if bool(body.get("stream")):
+            raise HTTPException(status_code=400, detail={"error": "stream is not supported"})
+
+        if not has_response_image_generation_tool(body):
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "only image_generation tool requests are supported on this endpoint"},
+            )
+
+        prompt = extract_response_prompt(body.get("input"))
+        if not prompt:
+            raise HTTPException(status_code=400, detail={"error": "input text is required"})
+
     def generate_with_pool(self, prompt: str, model: str, n: int):
         created = None
         image_items: list[dict[str, object]] = []
@@ -151,21 +180,10 @@ class ChatGPTService:
         }
 
     def create_image_completion(self, body: dict[str, object]) -> dict[str, object]:
-        if not is_image_chat_request(body):
-            raise HTTPException(
-                status_code=400,
-                detail={"error": "only image generation requests are supported on this endpoint"},
-            )
-
-        if bool(body.get("stream")):
-            raise HTTPException(status_code=400, detail={"error": "stream is not supported for image generation"})
-
+        self.validate_image_completion_request(body)
         model = str(body.get("model") or "gpt-image-1").strip() or "gpt-image-1"
         n = parse_image_count(body.get("n"))
         prompt = extract_chat_prompt(body)
-        if not prompt:
-            raise HTTPException(status_code=400, detail={"error": "prompt is required"})
-
         image_info = extract_chat_image(body)
         try:
             if image_info:
@@ -179,19 +197,8 @@ class ChatGPTService:
         return build_chat_image_completion(model, prompt, image_result)
 
     def create_response(self, body: dict[str, object]) -> dict[str, object]:
-        if bool(body.get("stream")):
-            raise HTTPException(status_code=400, detail={"error": "stream is not supported"})
-
-        if not has_response_image_generation_tool(body):
-            raise HTTPException(
-                status_code=400,
-                detail={"error": "only image_generation tool requests are supported on this endpoint"},
-            )
-
+        self.validate_response_request(body)
         prompt = extract_response_prompt(body.get("input"))
-        if not prompt:
-            raise HTTPException(status_code=400, detail={"error": "input text is required"})
-
         image_info = _extract_response_image(body.get("input"))
         model = str(body.get("model") or "gpt-5").strip() or "gpt-5"
         try:
